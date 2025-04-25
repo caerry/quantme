@@ -1,4 +1,4 @@
-![image | 100](https://github.com/user-attachments/assets/061bb510-40fd-44de-8fc3-490bd66520ae)
+![image](https://github.com/user-attachments/assets/061bb510-40fd-44de-8fc3-490bd66520ae =200x250)
 
 # QuantMe
 
