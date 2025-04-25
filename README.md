@@ -47,3 +47,4 @@ Profit. You know how much you are working that day.
 - Add notifications / play sounds via default linux libs
 - Add installer with creating service per user
 - Memory profily (?)
+- Modules for custom heuristics (?)
