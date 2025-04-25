@@ -48,3 +48,5 @@ Profit. You know how much you are working that day.
 - Add installer with creating service per user
 - Memory profily (?)
 - Modules for custom heuristics (?)
+- Better TUI (?)
+- Encryption for tasks / notes (?)
