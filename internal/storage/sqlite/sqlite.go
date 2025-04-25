@@ -93,7 +93,7 @@ func (s *SQLiteStore) SaveEvent(ctx context.Context, e event.Event) (int64, erro
 func (s *SQLiteStore) GetEvents(ctx context.Context, start, end time.Time, eventTypes ...event.EventType) ([]event.Event, error) {
 	query := `SELECT id, timestamp, type, app_name, window_title, value, tag, notes
 	          FROM events
-	          WHERE timestamp >= ? AND timestamp <= ?`
+	          WHERE timestamp >= ? AND timestamp <= ?` // Selects 8 columns
 	args := []interface{}{start, end}
 
 	if len(eventTypes) > 0 {
@@ -119,16 +119,27 @@ func (s *SQLiteStore) GetEvents(ctx context.Context, start, end time.Time, event
 		var windowTitle sql.NullString
 		var value sql.NullFloat64
 		var tag sql.NullString
-		var notes sql.NullString
+		var notes sql.NullString // Variable for the notes column
 
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Type, &appName, &windowTitle, &value, &tag); err != nil {
+		if err := rows.Scan(
+			&e.ID,
+			&e.Timestamp,
+			&e.Type,
+			&appName,
+			&windowTitle,
+			&value,
+			&tag,
+			&tag,
+		); err != nil {
 			return nil, fmt.Errorf("failed to scan event row: %w", err)
 		}
+
+		// Assign values from nullable types to the event struct
 		e.AppName = appName.String
 		e.WindowTitle = windowTitle.String
 		e.Value = value.Float64
 		e.Tag = tag.String
-		e.Notes = notes.String
+		e.Notes = notes.String // Assign the scanned notes value
 		events = append(events, e)
 	}
 
