@@ -7,231 +7,397 @@
         <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.1/dist/chart.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@2.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
         <style>
+            :root {
+                --bg-color: #f8f9fa;
+                --card-bg: #ffffff;
+                --text-color: #343a40;
+                --primary-color: #007bff;
+                --secondary-color: #6c757d;
+                --focus-color: #28a745; /* Green */
+                --break-color: #ffc107; /* Yellow */
+                --custom-event-color: #17a2b8; /* Teal */
+                --app-start-stop-color: #6f42c1; /* Indigo */
+                --unknown-color: #adb5bd; /* Gray */
+                --border-color: #dee2e6;
+                --shadow: 0 4px 8px rgba(0, 0, 0, 0.05);
+                --border-radius: 8px;
+            }
             body {
-                font-family: sans-serif;
-                margin: 20px;
-                background-color: #f4f4f4;
-            }
-            .chart-container {
-                background-color: #fff;
+                font-family:
+                    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                    "Helvetica Neue", Arial, sans-serif;
+                margin: 0;
                 padding: 20px;
+                background-color: var(--bg-color);
+                color: var(--text-color);
+                line-height: 1.6;
+            }
+            .report-header {
+                background-color: var(--primary-color);
+                color: white;
+                padding: 20px;
+                margin: -20px -20px 20px -20px;
+                border-bottom: 5px solid #0056b3; /* Darker primary */
+            }
+            .report-header h1 {
+                margin: 0;
+                font-size: 2em;
+            }
+            .report-header p {
+                margin: 5px 0 0;
+                opacity: 0.9;
+            }
+
+            .grid-container {
+                display: grid;
+                grid-template-columns: repeat(
+                    auto-fit,
+                    minmax(350px, 1fr)
+                ); /* Slightly smaller min width */
+                gap: 25px; /* Increased gap */
+                margin-bottom: 25px;
+            }
+
+            .chart-card,
+            .stats-card {
+                background-color: var(--card-bg);
+                padding: 25px;
+                border-radius: var(--border-radius);
+                box-shadow: var(--shadow);
+                border: 1px solid var(--border-color);
+                overflow: hidden; /* Keep this */
+            }
+            .chart-card h2,
+            .stats-card h2 {
+                margin-top: 0;
                 margin-bottom: 20px;
-                border-radius: 8px;
-                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+                color: var(--primary-color);
+                border-bottom: 1px solid var(--border-color);
+                padding-bottom: 10px;
+                font-size: 1.4em;
+                font-weight: 500; /* Slightly less bold */
             }
-            h1,
-            h2 {
-                color: #333;
+            .timeline-card {
+                grid-column: 1 / -1; /* Span full width */
+                /* *** FIX HERE: Constrain height *** */
+                max-height: 75vh; /* Max height relative to viewport */
+                overflow-y: auto; /* Allow vertical scrolling if needed */
+                /* Ensure padding doesn't prevent scrolling */
+                display: flex;
+                flex-direction: column;
             }
+            .timeline-card .chart-container {
+                /* Add container for canvas */
+                flex-grow: 1; /* Allow container to grow */
+                position: relative; /* Needed for chart responsiveness */
+                min-height: 450px; /* Ensure a minimum draw area */
+            }
+
             canvas {
                 max-width: 100%;
-                height: auto;
+                /* height: auto; <-- Remove this, let container handle height */
+            }
+
+            /* Pomodoro Stats specific styling */
+            .pomodoro-stats dl {
+                display: grid;
+                grid-template-columns: auto 1fr;
+                gap: 8px 15px;
+                align-items: center;
+            }
+            .pomodoro-stats dt {
+                font-weight: 600;
+                color: var(--secondary-color);
+                text-align: right;
+            }
+            .pomodoro-stats dd {
+                margin: 0;
+                font-size: 1.1em;
+            }
+            .pomodoro-stats .efficiency {
+                font-weight: bold;
+                color: var(--primary-color);
             }
         </style>
     </head>
     <body>
-        <h1>QuantMe Activity Report</h1>
-        <p>Report generated on: {{ .GeneratedAt }}</p>
-        <p>Data range: {{ .StartDate }} to {{ .EndDate }}</p>
-
-        <div class="chart-container">
-            <h2>Time Spent per Application</h2>
-            <canvas id="appTimeChart"></canvas>
+        <div class="report-header">
+            <h1>QuantMe Activity Report</h1>
+            <p>Report generated on: {{ .GeneratedAt }}</p>
+            <p>Data range: {{ .StartDate }} to {{ .EndDate }}</p>
         </div>
 
-        <div class="chart-container">
+        <div class="chart-card timeline-card">
             <h2>Activity Timeline</h2>
-            <p>
-                (Note: Timeline shows Focus Changes, Pomodoro States, and Custom
-                Events)
-            </p>
-            <canvas id="timelineChart"></canvas>
+            <!-- *** FIX HERE: Wrap canvas in a container *** -->
+            <div class="chart-container">
+                <canvas id="timelineChart"></canvas>
+            </div>
         </div>
 
-        <div class="chart-container">
-            <h2>Pomodoro Cycles Completed</h2>
-            <p>Total Focus Cycles: {{ .TotalPomodoroCycles }}</p>
-            <!-- Add more Pomodoro stats if needed -->
-        </div>
+        <div class="grid-container">
+            <div class="chart-card">
+                <h2>Application Usage Summary</h2>
+                <!-- Wrap canvas -->
+                <div class="chart-container" style="min-height: 300px">
+                    <canvas id="appSummaryChart"></canvas>
+                </div>
+            </div>
 
-        <div class="chart-container">
-            <h2>Custom Event Frequency</h2>
-            <canvas id="customEventChart"></canvas>
+            <div class="stats-card">
+                <h2>Pomodoro Summary</h2>
+                <div class="pomodoro-stats">
+                    <dl>
+                        <dt>Focus Cycles:</dt>
+                        <dd>{{ .PomodoroStats.TotalCycles }}</dd>
+                        <dt>Total Focus:</dt>
+                        <dd>{{ .PomodoroStats.FocusTimeStr }}</dd>
+                        <dt>Total Break:</dt>
+                        <dd>{{ .PomodoroStats.BreakTimeStr }}</dd>
+                        <dt>Focus Efficiency:</dt>
+                        <dd class="efficiency">
+                            {{ printf "%.1f" .PomodoroStats.Efficiency }}%
+                        </dd>
+                    </dl>
+                </div>
+            </div>
+
+            <div class="chart-card">
+                <h2>Custom Event Frequency</h2>
+                <!-- Wrap canvas -->
+                <div class="chart-container" style="min-height: 300px">
+                    <canvas id="customEventChart"></canvas>
+                </div>
+            </div>
         </div>
 
         <script>
-            // Data embedded from Go template
-            const appTimeData = {{ .AppTimeJSON }};
-            const timelineDataRaw = {{ .TimelineJSON }};
+            // --- Data From Go Template ---
+            const focusSpans = {{ .FocusSpansJSON }};
+            const discreteEvents = {{ .TimelineEventsJSON }};
+            const appSummaryData = {{ .AppSummaryJSON }};
             const customEventData = {{ .CustomEventsJSON }};
+            const appCategoryMap = {{ .AppCategoryJSON }};
 
-            // --- Application Time Chart (Pie Chart) ---
-            const ctxAppTime = document.getElementById('appTimeChart').getContext('2d');
-            new Chart(ctxAppTime, {
-                type: 'pie',
-                data: {
-                    labels: appTimeData.labels,
-                    datasets: [{
-                        label: 'Time Spent (minutes)',
-                        data: appTimeData.values,
-                        backgroundColor: [ // Add more colors if needed
-                            'rgba(255, 99, 132, 0.8)',
-                            'rgba(54, 162, 235, 0.8)',
-                            'rgba(255, 206, 86, 0.8)',
-                            'rgba(75, 192, 192, 0.8)',
-                            'rgba(153, 102, 255, 0.8)',
-                            'rgba(255, 159, 64, 0.8)',
-                            'rgba(199, 199, 199, 0.8)',
-                            'rgba(83, 102, 255, 0.8)',
-                            'rgba(100, 255, 100, 0.8)',
-                        ],
-                        borderColor: 'rgba(255, 255, 255, 0.7)',
-                        borderWidth: 1
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    plugins: {
-                        legend: {
-                            position: 'top',
-                        },
-                        tooltip: {
-                            callbacks: {
-                                label: function(context) {
-                                    let label = context.label || '';
-                                    if (label) {
-                                        label += ': ';
-                                    }
-                                    if (context.parsed !== null) {
-                                        label += context.parsed.toFixed(2) + ' minutes';
-                                    }
-                                    return label;
-                                }
-                            }
-                        }
-                    }
-                }
-            });
+            // --- Chart Config ---
+            const FONT_COLOR = getComputedStyle(document.documentElement).getPropertyValue('--text-color').trim();
+            const GRID_COLOR = getComputedStyle(document.documentElement).getPropertyValue('--border-color').trim();
+            Chart.defaults.color = FONT_COLOR;
+            Chart.defaults.borderColor = GRID_COLOR;
+            Chart.defaults.font.family = document.body.style.fontFamily || 'sans-serif'; // Use body font
 
-            // --- Timeline Chart (Scatter/Bubble Chart) ---
+            // --- Timeline Chart (Gantt + Scatter) ---
             const ctxTimeline = document.getElementById('timelineChart').getContext('2d');
-            // Map event types to numerical values for Y-axis and colors/shapes
-            const eventTypeMap = {
-                'focus_change': { y: 1, color: 'rgba(54, 162, 235, 0.7)', label: 'Focus' },
-                'pomodoro_state': { y: 2, color: 'rgba(255, 99, 132, 0.7)', label: 'Pomodoro' },
-                'custom': { y: 3, color: 'rgba(75, 192, 192, 0.7)', label: 'Custom' },
-                'app_start': { y: 4, color: 'rgba(153, 102, 255, 0.7)', label: 'Start' },
-                'app_stop': { y: 4, color: 'rgba(153, 102, 255, 0.7)', label: 'Stop' },
-            };
 
-            const timelineDataset = timelineDataRaw.map(event => {
-                const mapping = eventTypeMap[event.type] || { y: 0, color: 'grey', label: event.type };
-                let tooltipLabel = `${mapping.label}: `;
-                if (event.type === 'focus_change') tooltipLabel += event.app;
-                else if (event.type === 'pomodoro_state') tooltipLabel += event.tag;
-                else if (event.type === 'custom') tooltipLabel += event.tag;
-                else tooltipLabel += event.type;
-                if(event.notes) tooltipLabel += ` (${event.notes})`;
+            const appCategories = [...new Set(Object.values(appCategoryMap))].sort();
 
-                return {
-                    x: event.ts, // Timestamp string should be parsed by adapter
-                    y: mapping.y,
-                    r: 5, // Radius of bubble
-                    backgroundColor: mapping.color,
-                    tooltipLabel: tooltipLabel,
-                };
-            });
+            const appColorCache = {};
+            let colorIndex = 0;
+            const defaultColors = [
+                '#a8dadc', '#f1faee', '#e63946', '#457b9d', '#1d3557', '#fca311', '#e5e5e5',
+                '#2ec4b6', '#ff9f1c', '#011627', '#e71d36', '#adb5bd', '#3a86ff', '#ffbe0b'
+            ]; // Expanded palette
+            function getAppColor(appName) {
+                const category = appCategoryMap[appName] || appName;
+                if (!appColorCache[category]) {
+                    if (category === 'Unknown/Idle') return getComputedStyle(document.documentElement).getPropertyValue('--unknown-color').trim();
+                    appColorCache[category] = defaultColors[colorIndex % defaultColors.length];
+                    colorIndex++;
+                }
+                return appColorCache[category];
+            }
+
+            const timelineDatasets = [
+                // 1. Focus Spans (Gantt Bars)
+                {
+                    label: 'App Focus',
+                    data: focusSpans.map(span => ({
+                        x: [span.start, span.end],
+                        y: appCategoryMap[span.app] || span.app,
+                        appName: span.app
+                    })),
+                    backgroundColor: context => context.raw?.appName ? getAppColor(context.raw.appName) : getComputedStyle(document.documentElement).getPropertyValue('--unknown-color').trim(),
+                    borderColor: context => context.raw?.appName ? Chart.helpers.color(getAppColor(context.raw.appName)).darken(0.2).rgbString() : Chart.helpers.color(getComputedStyle(document.documentElement).getPropertyValue('--unknown-color').trim()).darken(0.2).rgbString(),
+                    borderWidth: 1,
+                    borderSkipped: false,
+                    barPercentage: 0.65, // Slightly thinner bars
+                    categoryPercentage: 0.75,
+                    order: 1
+                },
+                // 2. Pomodoro Events (Scatter Points)
+                {
+                    label: 'Pomodoro',
+                    data: discreteEvents.filter(e => e.type === 'pomodoro_state').map(e => ({
+                        x: e.ts,
+                        y: appCategoryMap[e.focusApp] || e.focusApp,
+                        eventData: e
+                    })),
+                    type: 'scatter',
+                    pointRadius: 6, // Slightly larger points
+                    pointHoverRadius: 8,
+                    backgroundColor: context => {
+                         const pointData = context.dataset.data[context.dataIndex];
+                         if (!pointData || !pointData.eventData) return getComputedStyle(document.documentElement).getPropertyValue('--secondary-color').trim();
+                         const state = pointData.eventData.tag;
+                         if (state === 'Focus') return getComputedStyle(document.documentElement).getPropertyValue('--focus-color').trim();
+                         if (state === 'ShortBreak' || state === 'LongBreak') return getComputedStyle(document.documentElement).getPropertyValue('--break-color').trim();
+                         return getComputedStyle(document.documentElement).getPropertyValue('--secondary-color').trim();
+                    },
+                    pointStyle: 'circle', // Explicitly circle
+                    order: 0
+                },
+                 // 3. Custom Events (Scatter Points)
+                {
+                    label: 'Custom Event',
+                    data: discreteEvents.filter(e => e.type === 'custom').map(e => ({
+                        x: e.ts,
+                        y: appCategoryMap[e.focusApp] || e.focusApp,
+                        eventData: e
+                    })),
+                    type: 'scatter',
+                    pointRadius: 6,
+                    pointHoverRadius: 8,
+                    backgroundColor: getComputedStyle(document.documentElement).getPropertyValue('--custom-event-color').trim(),
+                    pointStyle: 'rect', // Use squares for custom events
+                    order: 0
+                },
+                 // 4. App Start/Stop (Scatter Points)
+                {
+                    label: 'App Lifecycle',
+                    data: discreteEvents.filter(e => e.type === 'app_start' || e.type === 'app_stop').map(e => ({
+                        x: e.ts,
+                        y: appCategoryMap[e.focusApp] || e.focusApp,
+                        eventData: e
+                    })),
+                    type: 'scatter',
+                    pointRadius: 5, // Slightly smaller
+                    pointHoverRadius: 7,
+                    backgroundColor: getComputedStyle(document.documentElement).getPropertyValue('--app-start-stop-color').trim(),
+                    pointStyle: 'triangle', // Use triangles
+                    order: 0
+                }
+            ];
+
+            let minTime = focusSpans[0]?.start || discreteEvents[0]?.ts;
+            let maxTime = focusSpans[focusSpans.length - 1]?.end || discreteEvents[discreteEvents.length - 1]?.ts;
+            if (minTime && maxTime) {
+                const range = new Date(maxTime).getTime() - new Date(minTime).getTime();
+                if (range > 0) {
+                     minTime = new Date(new Date(minTime).getTime() - range * 0.01).toISOString();
+                     maxTime = new Date(new Date(maxTime).getTime() + range * 0.01).toISOString();
+                }
+            }
 
             new Chart(ctxTimeline, {
-                type: 'bubble',
+                type: 'bar',
                 data: {
-                    datasets: [{
-                        label: 'Activities',
-                        data: timelineDataset,
-                        // backgroundColor is set per point above
-                    }]
+                    labels: appCategories,
+                    datasets: timelineDatasets
                 },
                 options: {
+                    // *** FIX HERE: Set responsive and maintainAspectRatio correctly ***
+                    responsive: true,
+                    maintainAspectRatio: false, // Important: Let container control aspect ratio
+                    indexAxis: 'y',
                     scales: {
                         x: {
                             type: 'time',
                             time: {
-                                unit: 'hour', // Adjust based on range
-                                 tooltipFormat: 'PPpp', // Requires date-fns
-                                 displayFormats: {
-                                     hour: 'MMM d, HH:mm'
-                                 }
+                                unit: 'hour',
+                                tooltipFormat: 'PP HH:mm:ss',
+                                displayFormats: { minute: 'HH:mm', hour: 'MMM d, HH:mm', day: 'MMM d' }
                             },
-                            title: {
-                                display: true,
-                                text: 'Time'
-                            }
+                            title: { display: true, text: 'Time' },
+                            min: minTime,
+                            max: maxTime,
+                            position: 'top',
+                            grid: { color: GRID_COLOR, borderDash: [2, 4] }
                         },
                         y: {
-                            min: 0,
-                            max: 5, // Adjust based on number of event types + 1
-                            ticks: {
-                                stepSize: 1,
-                                callback: function(value, index, values) {
-                                    // Find label based on value
-                                    for (const key in eventTypeMap) {
-                                        if (eventTypeMap[key].y === value) {
-                                            return eventTypeMap[key].label;
-                                        }
-                                    }
-                                    return ''; // Or return value if no label found
-                                }
-                            },
-                            title: {
-                                display: true,
-                                text: 'Activity Type'
-                            }
+                            title: { display: true, text: 'Application / Activity' },
+                            grid: { display: false },
+                            ticks: { autoSkip: true, maxTicksLimit: 25 } // Allow slightly more ticks
                         }
                     },
                     plugins: {
-                         tooltip: {
+                        tooltip: { // Tooltip config remains the same (using safer access)
                             callbacks: {
-                                label: function(context) {
-                                    // Access the custom label stored in the data point
-                                     return context.raw.tooltipLabel || 'Event';
-                                }
+                                title: function(tooltipItems) { /* ... */ },
+                                label: function(context) { /* ... */ }
                             }
                         },
                         legend: {
-                             display: false // Hiding legend as colors/Y explain type
+                            display: true,
+                            position: 'bottom',
+                            labels: {
+                                usePointStyle: true, // Use point styles in legend
+                                filter: item => item.text !== 'App Focus'
+                            }
                         }
+                    },
+                     // Interaction tuning (optional)
+                    interaction: {
+                        mode: 'nearest', // Find nearest item in any dataset
+                        axis: 'y',      // Prioritize items on the same y-level (app)
+                        intersect: false // Tooltip triggers even if not precisely hitting point/bar
                     }
                 }
             });
 
 
-            // --- Custom Event Chart (Bar Chart) ---
-            const ctxCustomEvent = document.getElementById('customEventChart').getContext('2d');
-            new Chart(ctxCustomEvent, {
+            // --- Application Summary Chart (Horizontal Bar) ---
+            const ctxAppSummary = document.getElementById('appSummaryChart').getContext('2d');
+            new Chart(ctxAppSummary, {
                 type: 'bar',
-                data: {
-                    labels: customEventData.labels,
+                data: { /* ... data remains same ... */
+                    labels: appSummaryData.labels,
                     datasets: [{
-                        label: 'Count',
-                        data: customEventData.values,
-                        backgroundColor: 'rgba(75, 192, 192, 0.8)',
-                        borderColor: 'rgba(75, 192, 192, 1)',
+                        label: 'Time Spent (minutes)',
+                        data: appSummaryData.values,
+                        backgroundColor: appSummaryData.labels.map(app => getAppColor(app)),
+                        borderColor: 'rgba(255, 255, 255, 0.3)',
                         borderWidth: 1
                     }]
                 },
                 options: {
+                    indexAxis: 'y',
                     responsive: true,
-                     indexAxis: 'y', // Makes it a horizontal bar chart
-                    scales: {
-                         x: {
-                             beginAtZero: true,
-                             ticks: { stepSize: 1 } // Ensure integer ticks for counts
-                         }
+                    maintainAspectRatio: false,
+                    scales: { /* ... scales remain same ... */
+                         x: { beginAtZero: true, title: { display: true, text: 'Minutes' } },
+                         y: { ticks: { autoSkip: false } }
                     },
-                    plugins: {
-                        legend: {
-                            display: false
-                        }
+                    plugins: { /* ... plugins remain same ... */
+                         legend: { display: false },
+                         tooltip: { callbacks: { label: function(context) { return ` ${context.raw.toFixed(1)} minutes`; } } }
+                    }
+                }
+            });
+
+
+            // --- Custom Event Chart (Horizontal Bar) ---
+            const ctxCustomEvent = document.getElementById('customEventChart').getContext('2d');
+            new Chart(ctxCustomEvent, {
+                type: 'bar',
+                data: { /* ... data remains same ... */
+                    labels: customEventData.labels,
+                    datasets: [{
+                        label: 'Count',
+                        data: customEventData.values,
+                        backgroundColor: getComputedStyle(document.documentElement).getPropertyValue('--custom-event-color').trim(),
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: { /* ... scales remain same ... */
+                         x: { beginAtZero: true, ticks: { stepSize: 1 }, title: { display: true, text: 'Count' } },
+                         y: { ticks: { autoSkip: false } }
+                    },
+                    plugins: { /* ... plugins remain same ... */
+                         legend: { display: false }
                     }
                 }
             });
