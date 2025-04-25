@@ -196,29 +196,54 @@ var statusCmd = &cobra.Command{
 	},
 }
 
-type ReportData struct {
-	GeneratedAt         string
-	StartDate           string
-	EndDate             string
-	AppTimeJSON         template.JS // Use template.JS to prevent escaping
-	TimelineJSON        template.JS
-	CustomEventsJSON    template.JS
-	TotalPomodoroCycles int
+type AppFocusSpan struct {
+	AppName   string `json:"app"`
+	StartTime string `json:"start"` // ISO 8601
+	EndTime   string `json:"end"`   // ISO 8601
 }
 
-type ChartData struct {
+// TimelineEvent represents discrete events on the timeline
+type TimelineEvent struct {
+	Timestamp string          `json:"ts"` // ISO 8601
+	Type      event.EventType `json:"type"`
+	Tag       string          `json:"tag,omitempty"` // Pomodoro state, Custom tag
+	Notes     string          `json:"notes,omitempty"`
+	Value     float64         `json:"value,omitempty"`
+	// We'll add the AppName that was focused during this event for plotting
+	FocusApp string `json:"focusApp,omitempty"`
+}
+
+// BarChartData for simple horizontal bar charts
+type BarChartData struct {
 	Labels []string  `json:"labels"`
 	Values []float64 `json:"values"`
 }
 
-type TimelineEvent struct {
-	TS    string          `json:"ts"` // ISO 8601 format for JS
-	Type  event.EventType `json:"type"`
-	App   string          `json:"app,omitempty"`
-	Title string          `json:"title,omitempty"`
-	Tag   string          `json:"tag,omitempty"`
-	Notes string          `json:"notes,omitempty"`
-	Value float64         `json:"value,omitempty"`
+// PomodoroSummary holds calculated pomodoro stats
+type PomodoroSummary struct {
+	TotalCycles      int           `json:"totalCycles"`
+	TotalFocusTime   time.Duration `json:"-"` // For internal calc
+	TotalBreakTime   time.Duration `json:"-"` // For internal calc
+	FocusTimeStr     string        `json:"focusTimeStr"`
+	BreakTimeStr     string        `json:"breakTimeStr"`
+	Efficiency       float64       `json:"efficiency"` // Focus / (Focus + Break) * 100
+	FocusEvents      int           `json:"-"`          // Internal counter
+	ShortBreakEvents int           `json:"-"`          // Internal counter
+	LongBreakEvents  int           `json:"-"`          // Internal counter
+}
+
+// Data structure for the main HTML template
+type ReportData struct {
+	GeneratedAt        string
+	StartDate          string
+	EndDate            string
+	FocusSpansJSON     template.JS       // For Gantt-like bars
+	TimelineEventsJSON template.JS       // For scatter points
+	AppSummaryJSON     template.JS       // For App time summary bar chart
+	CustomEventsJSON   template.JS       // For Custom event summary bar chart
+	PomodoroStats      PomodoroSummary   // Pomodoro summary stats
+	AppCategoryMap     map[string]string // Maps AppName to a consistent label/category for Y-axis
+	AppCategoryJSON    template.JS       // JSON version of the category map for JS
 }
 
 func openBrowser(url string) error {
@@ -262,204 +287,280 @@ var reportGenerateCmd = &cobra.Command{
 		outputFile, _ := cmd.Flags().GetString("output")
 		openReport, _ := cmd.Flags().GetBool("open")
 
-		// Calculate time range
 		endTime := time.Now()
-		startTime := endTime.AddDate(0, 0, -days) // Go back 'days' days
+		startTime := endTime.AddDate(0, 0, -days)
 
 		log.Printf("Generating report for %d days (%s to %s)", days, startTime.Format("2006-01-02"), endTime.Format("2006-01-02"))
 		log.Printf("Using database: %s", dbPath)
 
 		// Initialize storage
 		store := sqlitestore.NewSQLiteStore(dbPath)
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Context for DB operations
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-
-		// NOTE: We are calling Init just to open the DB connection via sql.Open.
-		// This doesn't run the table creation logic if the DB exists.
-		// A cleaner approach might be to refactor storage to have an Open() method.
 		if err := store.Init(ctx); err != nil {
 			log.Fatalf("Failed to initialize storage connection: %v", err)
 		}
 		defer store.Close()
 
 		// Fetch all relevant events
-		events, err := store.GetEvents(ctx, startTime, endTime,
-			event.EventTypeFocusChange,
-			event.EventTypeCustom,
-			event.EventTypePomodoro,
-			event.EventTypeAppStart,
-			event.EventTypeAppStop,
-		)
+		allEvents, err := store.GetEvents(ctx, startTime, endTime) // Fetch all types first
 		if err != nil {
 			log.Fatalf("Failed to fetch events: %v", err)
 		}
-
-		log.Printf("Fetched %d events for report.", len(events))
-		if len(events) == 0 {
-			log.Println("No event data found for the specified period.")
-			// Optionally generate an empty report or just exit
-			fmt.Println("No data to generate report.")
+		if len(allEvents) == 0 {
+			fmt.Println("No event data found for the specified period.")
 			return
 		}
+		log.Printf("Fetched %d total events for report.", len(allEvents))
 
-		// Process data
-		appTime := make(map[string]time.Duration)
-		var timelineEvents []TimelineEvent
-		customEventCounts := make(map[string]int)
-		pomoCycles := 0
-		var lastFocusTime time.Time = startTime // Start duration calc from beginning of period
-
-		// Sort events by timestamp just in case DB didn't guarantee it
-		sort.Slice(events, func(i, j int) bool {
-			return events[i].Timestamp.Before(events[j].Timestamp)
+		// --- Data Processing ---
+		sort.Slice(allEvents, func(i, j int) bool {
+			return allEvents[i].Timestamp.Before(allEvents[j].Timestamp)
 		})
 
-		if len(events) > 0 && events[0].Type == event.EventTypeFocusChange {
-			lastFocusTime = events[0].Timestamp // If first event is focus, start from there
-		}
+		var focusSpans []AppFocusSpan
+		var discreteEvents []TimelineEvent
+		appTotalTime := make(map[string]time.Duration)
+		customEventCounts := make(map[string]int)
+		pomoStats := PomodoroSummary{}
+		appCategories := make(map[string]string) // AppName -> Y-axis Label
+		appCategoryIndex := 0
 
-		for i, e := range events {
-			// Timeline data
-			timelineEvents = append(timelineEvents, TimelineEvent{
-				TS:    e.Timestamp.Format(time.RFC3339), // ISO 8601 for JS
-				Type:  e.Type,
-				App:   e.AppName,
-				Title: e.WindowTitle,
-				Tag:   e.Tag,
-				Notes: e.Notes,
-				Value: e.Value,
+		var lastFocusEvent *event.Event = nil
+		currentFocusApp := "Unknown/Idle" // Track focus for discrete events
+
+		// Determine initial focus state at startTime
+		// Look backwards from the first event to find the *last* focus change before startTime
+		// (This requires another query or loading slightly more data before startTime)
+		// Simpler approach for now: Assume idle or use first event if it's focus change.
+		if allEvents[0].Type == event.EventTypeFocusChange {
+			currentFocusApp = allEvents[0].AppName
+			lastFocusEvent = &allEvents[0] // Treat first event as start of its span
+		} else {
+			// If first event isn't focus, assume idle from startTime until first focus change
+			focusSpans = append(focusSpans, AppFocusSpan{
+				AppName:   "Unknown/Idle",
+				StartTime: startTime.Format(time.RFC3339),
+				// EndTime determined by first focus change
 			})
+			if _, exists := appCategories["Unknown/Idle"]; !exists {
+				appCategories["Unknown/Idle"] = "Unknown/Idle" // Or maybe map to index 0?
+			}
+		}
 
-			// App time calculation (based on focus change)
+		for _, e := range allEvents {
+			// Assign app to category map if new
+			if e.AppName != "" { // Assign category for any event with app name
+				if _, exists := appCategories[e.AppName]; !exists {
+					appCategories[e.AppName] = e.AppName // Use AppName as label for now
+					appCategoryIndex++
+				}
+			}
+
+			// --- Process Focus Changes to create Spans ---
 			if e.Type == event.EventTypeFocusChange {
-				// Calculate duration of the *previous* focus
-				// Find previous focus change event or start time
-				prevFocusTime := startTime
-				prevAppName := "Unknown/Idle"
-				for j := i - 1; j >= 0; j-- {
-					if events[j].Type == event.EventTypeFocusChange {
-						prevFocusTime = events[j].Timestamp
-						prevAppName = events[j].AppName
-						break // Found the immediate previous focus
+				currentFocusApp = e.AppName // Update current focus
+
+				if lastFocusEvent != nil {
+					// End the previous span
+					span := AppFocusSpan{
+						AppName:   lastFocusEvent.AppName,
+						StartTime: lastFocusEvent.Timestamp.Format(time.RFC3339),
+						EndTime:   e.Timestamp.Format(time.RFC3339),
 					}
-					// If we hit AppStart without focus change, use start time? Needs refinement.
+					if span.AppName == "" {
+						span.AppName = "Unknown/Idle"
+					} // Handle empty app name
+					focusSpans = append(focusSpans, span)
+
+					// Add duration to total time
+					if !e.Timestamp.Before(lastFocusEvent.Timestamp) {
+						duration := e.Timestamp.Sub(lastFocusEvent.Timestamp)
+						appTotalTime[lastFocusEvent.AppName] += duration
+					}
+
+				} else if len(focusSpans) > 0 && focusSpans[0].AppName == "Unknown/Idle" && focusSpans[0].EndTime == "" {
+					// End the initial idle span if it exists
+					focusSpans[0].EndTime = e.Timestamp.Format(time.RFC3339)
+					duration := e.Timestamp.Sub(startTime)
+					appTotalTime["Unknown/Idle"] += duration
 				}
-				// Use AppName from the previous event for duration calculation
-				if prevAppName != "Unknown/Idle" && !e.Timestamp.Before(prevFocusTime) {
-					duration := e.Timestamp.Sub(prevFocusTime)
-					appTime[prevAppName] += duration
-				}
-				lastFocusTime = e.Timestamp // Update last focus time for next calc or end calc
+				lastFocusEvent = &e // Current event becomes the start of the next span
 			}
 
-			// Custom event counts
-			if e.Type == event.EventTypeCustom {
+			// --- Process Discrete Events ---
+			isDiscrete := false
+			switch e.Type {
+			case event.EventTypePomodoro:
+				discreteEvents = append(discreteEvents, TimelineEvent{
+					Timestamp: e.Timestamp.Format(time.RFC3339), Type: e.Type, Tag: e.Tag, Notes: e.Notes, FocusApp: currentFocusApp,
+				})
+				isDiscrete = true
+				// Calculate Pomodoro Stats
+				state := event.PomodoroState(e.Tag)
+				var duration time.Duration
+				if e.Value > 0 {
+					duration = time.Duration(e.Value) * time.Minute
+				} else { // Estimate duration if value is missing (less accurate)
+					switch state {
+					case event.StateFocus:
+						duration = pomoStats.TotalFocusTime / time.Duration(max(1, pomoStats.FocusEvents))
+					case event.StateShortBreak:
+						duration = pomoStats.TotalBreakTime / time.Duration(max(1, pomoStats.ShortBreakEvents+pomoStats.LongBreakEvents)) // Rough estimate
+					case event.StateLongBreak:
+						duration = pomoStats.TotalBreakTime / time.Duration(max(1, pomoStats.ShortBreakEvents+pomoStats.LongBreakEvents)) // Rough estimate
+					}
+				}
+
+				if state == event.StateFocus {
+					pomoStats.TotalFocusTime += duration
+					pomoStats.FocusEvents++
+					pomoStats.TotalCycles = max(pomoStats.TotalCycles, pomoStats.FocusEvents) // Cycle count is number of focus starts
+				} else if state == event.StateShortBreak || state == event.StateLongBreak {
+					pomoStats.TotalBreakTime += duration
+					if state == event.StateShortBreak {
+						pomoStats.ShortBreakEvents++
+					}
+					if state == event.StateLongBreak {
+						pomoStats.LongBreakEvents++
+					}
+				}
+
+			case event.EventTypeCustom:
+				discreteEvents = append(discreteEvents, TimelineEvent{
+					Timestamp: e.Timestamp.Format(time.RFC3339), Type: e.Type, Tag: e.Tag, Notes: e.Notes, Value: e.Value, FocusApp: currentFocusApp,
+				})
 				customEventCounts[e.Tag]++
+				isDiscrete = true
+			case event.EventTypeAppStart, event.EventTypeAppStop:
+				discreteEvents = append(discreteEvents, TimelineEvent{
+					Timestamp: e.Timestamp.Format(time.RFC3339), Type: e.Type, FocusApp: currentFocusApp,
+				})
+				isDiscrete = true
 			}
-
-			// Pomodoro cycle count (count end of Focus state)
-			if e.Type == event.EventTypePomodoro && event.PomodoroState(e.Tag) == event.StateFocus {
-				// Look ahead to see if this focus session completed within the time range
-				// This is tricky. A simpler approach is to count the *start* of focus cycles
-				// or count *start* of break cycles. Let's count focus starts for simplicity.
-				pomoCycles++
-			}
-		}
-
-		// Add time for the last focused app until the end of the period
-		var lastAppName = "Unknown/Idle"
-		for i := len(events) - 1; i >= 0; i-- {
-			if events[i].Type == event.EventTypeFocusChange {
-				lastAppName = events[i].AppName
-				lastFocusTime = events[i].Timestamp
-				break
+			// Add app name to category map even for discrete events if it exists
+			if isDiscrete && e.AppName != "" {
+				if _, exists := appCategories[e.AppName]; !exists {
+					appCategories[e.AppName] = e.AppName
+				}
 			}
 		}
-		if lastAppName != "Unknown/Idle" && endTime.After(lastFocusTime) {
-			duration := endTime.Sub(lastFocusTime)
-			appTime[lastAppName] += duration
+
+		// Add the final focus span (from last focus change until endTime)
+		if lastFocusEvent != nil && endTime.After(lastFocusEvent.Timestamp) {
+			span := AppFocusSpan{
+				AppName:   lastFocusEvent.AppName,
+				StartTime: lastFocusEvent.Timestamp.Format(time.RFC3339),
+				EndTime:   endTime.Format(time.RFC3339),
+			}
+			if span.AppName == "" {
+				span.AppName = "Unknown/Idle"
+			}
+			focusSpans = append(focusSpans, span)
+			duration := endTime.Sub(lastFocusEvent.Timestamp)
+			appTotalTime[lastFocusEvent.AppName] += duration
+		} else if lastFocusEvent == nil && len(allEvents) > 0 {
+			// Handle case where there were *no* focus change events in the period
+			focusSpans = append(focusSpans, AppFocusSpan{
+				AppName:   "Unknown/Idle", // Or determine from non-focus events if possible
+				StartTime: startTime.Format(time.RFC3339),
+				EndTime:   endTime.Format(time.RFC3339),
+			})
+			duration := endTime.Sub(startTime)
+			appTotalTime["Unknown/Idle"] += duration
+			if _, exists := appCategories["Unknown/Idle"]; !exists {
+				appCategories["Unknown/Idle"] = "Unknown/Idle"
+			}
 		}
 
-		// Prepare data for charts
-		appTimeChart := ChartData{Labels: make([]string, 0), Values: make([]float64, 0)}
-		for app, duration := range appTime {
-			appTimeChart.Labels = append(appTimeChart.Labels, app)
-			appTimeChart.Values = append(appTimeChart.Values, duration.Minutes())
+		// --- Prepare Chart Data ---
+
+		// App Summary (Bar Chart)
+		appSummaryChart := BarChartData{Labels: make([]string, 0), Values: make([]float64, 0)}
+		// Sort apps by duration descending
+		type appDur struct {
+			Name string
+			Dur  time.Duration
+		}
+		appDurs := make([]appDur, 0, len(appTotalTime))
+		for app, dur := range appTotalTime {
+			if app == "" {
+				app = "Unknown/Idle"
+			} // Group empty app names
+			appDurs = append(appDurs, appDur{app, dur})
+		}
+		sort.Slice(appDurs, func(i, j int) bool {
+			return appDurs[i].Dur > appDurs[j].Dur
+		})
+		for _, ad := range appDurs {
+			// Skip entries with zero duration
+			if ad.Dur.Minutes() < 0.1 {
+				continue
+			}
+			appSummaryChart.Labels = append(appSummaryChart.Labels, ad.Name)
+			appSummaryChart.Values = append(appSummaryChart.Values, ad.Dur.Minutes())
 		}
 
-		customEventChart := ChartData{Labels: make([]string, 0), Values: make([]float64, 0)}
+		// Custom Events (Bar Chart)
+		customEventChart := BarChartData{Labels: make([]string, 0), Values: make([]float64, 0)}
+		// Sort custom events by count descending
+		type eventCount struct {
+			Tag   string
+			Count int
+		}
+		eventCounts := make([]eventCount, 0, len(customEventCounts))
 		for tag, count := range customEventCounts {
-			customEventChart.Labels = append(customEventChart.Labels, tag)
-			customEventChart.Values = append(customEventChart.Values, float64(count))
+			eventCounts = append(eventCounts, eventCount{tag, count})
+		}
+		sort.Slice(eventCounts, func(i, j int) bool { return eventCounts[i].Count > eventCounts[j].Count })
+		for _, ec := range eventCounts {
+			customEventChart.Labels = append(customEventChart.Labels, ec.Tag)
+			customEventChart.Values = append(customEventChart.Values, float64(ec.Count))
 		}
 
-		// Sort chart data for better presentation
-		sort.Strings(appTimeChart.Labels) // Sort app names alphabetically
-		// Reorder values accordingly (could be improved with a struct slice)
-		reorderedAppValues := make([]float64, len(appTimeChart.Labels))
-		originalMap := make(map[string]float64)
-		for _, label := range appTimeChart.Labels {
-			for app, duration := range appTime {
-				if app == label {
-					originalMap[label] = duration.Minutes()
-					break
-				}
-			}
+		// Finalize Pomodoro Stats
+		pomoStats.FocusTimeStr = formatDurationHuman(pomoStats.TotalFocusTime)
+		pomoStats.BreakTimeStr = formatDurationHuman(pomoStats.TotalBreakTime)
+		totalPomoActiveTime := pomoStats.TotalFocusTime + pomoStats.TotalBreakTime
+		if totalPomoActiveTime > 0 {
+			pomoStats.Efficiency = (float64(pomoStats.TotalFocusTime) / float64(totalPomoActiveTime)) * 100.0
 		}
-		for i, label := range appTimeChart.Labels {
-			reorderedAppValues[i] = originalMap[label]
-		}
-		appTimeChart.Values = reorderedAppValues
-
-		sort.Strings(customEventChart.Labels) // Sort tags alphabetically
-		reorderedEventValues := make([]float64, len(customEventChart.Labels))
-		originalEventMap := make(map[string]float64)
-		for _, label := range customEventChart.Labels {
-			for tag, count := range customEventCounts {
-				if tag == label {
-					originalEventMap[label] = float64(count)
-					break
-				}
-			}
-		}
-		for i, label := range customEventChart.Labels {
-			reorderedEventValues[i] = originalEventMap[label]
-		}
-		customEventChart.Values = reorderedEventValues
 
 		// Marshal data to JSON for embedding
-		appJson, _ := json.Marshal(appTimeChart)
-		timelineJson, _ := json.Marshal(timelineEvents)
+		focusSpansJson, _ := json.Marshal(focusSpans)
+		discreteEventsJson, _ := json.Marshal(discreteEvents)
+		appSummaryJson, _ := json.Marshal(appSummaryChart)
 		customJson, _ := json.Marshal(customEventChart)
+		appCategoryJson, _ := json.Marshal(appCategories) // Pass mapping to JS
 
 		// Prepare data for template execution
 		reportData := ReportData{
-			GeneratedAt:         time.Now().Format("2006-01-02 15:04:05"),
-			StartDate:           startTime.Format("2006-01-02"),
-			EndDate:             endTime.Format("2006-01-02"),
-			AppTimeJSON:         template.JS(appJson),
-			TimelineJSON:        template.JS(timelineJson),
-			CustomEventsJSON:    template.JS(customJson),
-			TotalPomodoroCycles: pomoCycles, // Use the calculated count
+			GeneratedAt:        time.Now().Format("2006-01-02 15:04:05"),
+			StartDate:          startTime.Format("2006-01-02"),
+			EndDate:            endTime.Format("2006-01-02"),
+			FocusSpansJSON:     template.JS(focusSpansJson),
+			TimelineEventsJSON: template.JS(discreteEventsJson),
+			AppSummaryJSON:     template.JS(appSummaryJson),
+			CustomEventsJSON:   template.JS(customJson),
+			PomodoroStats:      pomoStats,
+			AppCategoryMap:     appCategories,                // Pass raw map for potential Go-side use
+			AppCategoryJSON:    template.JS(appCategoryJson), // Pass JSON map for JS use
 		}
 
-		// Find the template file relative to the executable or CWD
-		// This makes it work better when installed/run from different locations
+		// --- Template Parsing and Execution ---
 		exePath, err := os.Executable()
 		if err != nil {
-			log.Printf("Warning: Cannot determine executable path: %v. Looking for template in CWD.", err)
-			exePath = "." // Fallback to current working directory
+			log.Printf("Warning: Cannot determine executable path: %v...", err)
+			exePath = "."
 		}
 		templatePath := filepath.Join(filepath.Dir(exePath), "template.html")
 		if _, err := os.Stat(templatePath); os.IsNotExist(err) {
-			// If not found near executable, try current working directory
 			templatePath = "template.html"
 			if _, err := os.Stat(templatePath); os.IsNotExist(err) {
 				log.Fatalf("Error: template.html not found near executable or in current directory.")
 			}
 		}
 
-		// Parse and execute template
 		tmpl, err := template.ParseFiles(templatePath)
 		if err != nil {
 			log.Fatalf("Failed to parse template file (%s): %v", templatePath, err)
@@ -478,7 +579,6 @@ var reportGenerateCmd = &cobra.Command{
 
 		log.Printf("Report successfully generated: %s", outputFile)
 
-		// Open in browser if requested
 		if openReport {
 			absPath, _ := filepath.Abs(outputFile)
 			url := "file://" + absPath
@@ -488,6 +588,18 @@ var reportGenerateCmd = &cobra.Command{
 			}
 		}
 	},
+}
+
+func formatDurationHuman(d time.Duration) string {
+	d = d.Round(time.Minute) // Round to nearest minute for summary
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	return fmt.Sprintf("%dm", m)
 }
 
 func main() {
