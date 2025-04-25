@@ -1,18 +1,28 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"log"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
 	"time"
 
 	"quantme/internal/event"
 	"quantme/internal/ipc"
 
+	sqlitestore "quantme/internal/storage/sqlite"
+
 	"github.com/spf13/cobra"
 )
+
+var dbPath string
 
 var rootCmd = &cobra.Command{
 	Use:   "quantme-cli",
@@ -186,9 +196,311 @@ var statusCmd = &cobra.Command{
 	},
 }
 
+type ReportData struct {
+	GeneratedAt         string
+	StartDate           string
+	EndDate             string
+	AppTimeJSON         template.JS // Use template.JS to prevent escaping
+	TimelineJSON        template.JS
+	CustomEventsJSON    template.JS
+	TotalPomodoroCycles int
+}
+
+type ChartData struct {
+	Labels []string  `json:"labels"`
+	Values []float64 `json:"values"`
+}
+
+type TimelineEvent struct {
+	TS    string          `json:"ts"` // ISO 8601 format for JS
+	Type  event.EventType `json:"type"`
+	App   string          `json:"app,omitempty"`
+	Title string          `json:"title,omitempty"`
+	Tag   string          `json:"tag,omitempty"`
+	Notes string          `json:"notes,omitempty"`
+	Value float64         `json:"value,omitempty"`
+}
+
+func openBrowser(url string) error {
+	var cmd string
+	var args []string
+
+	switch runtime.GOOS {
+	case "windows":
+		cmd = "cmd"
+		args = []string{"/c", "start"}
+	case "darwin":
+		cmd = "open"
+	default: // "linux", "freebsd", "openbsd", "netbsd"
+		cmd = "xdg-open"
+	}
+	args = append(args, url)
+	return exec.Command(cmd, args...).Start()
+}
+
+// Report Command Group
+var reportCmd = &cobra.Command{
+	Use:   "report",
+	Short: "Generate reports from QuantMe data",
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		// Ensure dbPath is determined before subcommands run
+		rootCmd.PersistentPreRun(cmd, args)
+		// Check if DB file exists before trying to generate report
+		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+			log.Fatalf("Error: Database file not found at %s. Ensure quantme daemon has run or specify path with --db.", dbPath)
+		} else if err != nil {
+			log.Fatalf("Error accessing database file %s: %v", dbPath, err)
+		}
+	},
+}
+
+var reportGenerateCmd = &cobra.Command{
+	Use:   "generate",
+	Short: "Generate an HTML activity report",
+	Run: func(cmd *cobra.Command, args []string) {
+		days, _ := cmd.Flags().GetInt("days")
+		outputFile, _ := cmd.Flags().GetString("output")
+		openReport, _ := cmd.Flags().GetBool("open")
+
+		// Calculate time range
+		endTime := time.Now()
+		startTime := endTime.AddDate(0, 0, -days) // Go back 'days' days
+
+		log.Printf("Generating report for %d days (%s to %s)", days, startTime.Format("2006-01-02"), endTime.Format("2006-01-02"))
+		log.Printf("Using database: %s", dbPath)
+
+		// Initialize storage
+		store := sqlitestore.NewSQLiteStore(dbPath)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Context for DB operations
+		defer cancel()
+
+		// NOTE: We are calling Init just to open the DB connection via sql.Open.
+		// This doesn't run the table creation logic if the DB exists.
+		// A cleaner approach might be to refactor storage to have an Open() method.
+		if err := store.Init(ctx); err != nil {
+			log.Fatalf("Failed to initialize storage connection: %v", err)
+		}
+		defer store.Close()
+
+		// Fetch all relevant events
+		events, err := store.GetEvents(ctx, startTime, endTime,
+			event.EventTypeFocusChange,
+			event.EventTypeCustom,
+			event.EventTypePomodoro,
+			event.EventTypeAppStart,
+			event.EventTypeAppStop,
+		)
+		if err != nil {
+			log.Fatalf("Failed to fetch events: %v", err)
+		}
+
+		log.Printf("Fetched %d events for report.", len(events))
+		if len(events) == 0 {
+			log.Println("No event data found for the specified period.")
+			// Optionally generate an empty report or just exit
+			fmt.Println("No data to generate report.")
+			return
+		}
+
+		// Process data
+		appTime := make(map[string]time.Duration)
+		var timelineEvents []TimelineEvent
+		customEventCounts := make(map[string]int)
+		pomoCycles := 0
+		var lastFocusTime time.Time = startTime // Start duration calc from beginning of period
+
+		// Sort events by timestamp just in case DB didn't guarantee it
+		sort.Slice(events, func(i, j int) bool {
+			return events[i].Timestamp.Before(events[j].Timestamp)
+		})
+
+		if len(events) > 0 && events[0].Type == event.EventTypeFocusChange {
+			lastFocusTime = events[0].Timestamp // If first event is focus, start from there
+		}
+
+		for i, e := range events {
+			// Timeline data
+			timelineEvents = append(timelineEvents, TimelineEvent{
+				TS:    e.Timestamp.Format(time.RFC3339), // ISO 8601 for JS
+				Type:  e.Type,
+				App:   e.AppName,
+				Title: e.WindowTitle,
+				Tag:   e.Tag,
+				Notes: e.Notes,
+				Value: e.Value,
+			})
+
+			// App time calculation (based on focus change)
+			if e.Type == event.EventTypeFocusChange {
+				// Calculate duration of the *previous* focus
+				// Find previous focus change event or start time
+				prevFocusTime := startTime
+				prevAppName := "Unknown/Idle"
+				for j := i - 1; j >= 0; j-- {
+					if events[j].Type == event.EventTypeFocusChange {
+						prevFocusTime = events[j].Timestamp
+						prevAppName = events[j].AppName
+						break // Found the immediate previous focus
+					}
+					// If we hit AppStart without focus change, use start time? Needs refinement.
+				}
+				// Use AppName from the previous event for duration calculation
+				if prevAppName != "Unknown/Idle" && !e.Timestamp.Before(prevFocusTime) {
+					duration := e.Timestamp.Sub(prevFocusTime)
+					appTime[prevAppName] += duration
+				}
+				lastFocusTime = e.Timestamp // Update last focus time for next calc or end calc
+			}
+
+			// Custom event counts
+			if e.Type == event.EventTypeCustom {
+				customEventCounts[e.Tag]++
+			}
+
+			// Pomodoro cycle count (count end of Focus state)
+			if e.Type == event.EventTypePomodoro && event.PomodoroState(e.Tag) == event.StateFocus {
+				// Look ahead to see if this focus session completed within the time range
+				// This is tricky. A simpler approach is to count the *start* of focus cycles
+				// or count *start* of break cycles. Let's count focus starts for simplicity.
+				pomoCycles++
+			}
+		}
+
+		// Add time for the last focused app until the end of the period
+		var lastAppName = "Unknown/Idle"
+		for i := len(events) - 1; i >= 0; i-- {
+			if events[i].Type == event.EventTypeFocusChange {
+				lastAppName = events[i].AppName
+				lastFocusTime = events[i].Timestamp
+				break
+			}
+		}
+		if lastAppName != "Unknown/Idle" && endTime.After(lastFocusTime) {
+			duration := endTime.Sub(lastFocusTime)
+			appTime[lastAppName] += duration
+		}
+
+		// Prepare data for charts
+		appTimeChart := ChartData{Labels: make([]string, 0), Values: make([]float64, 0)}
+		for app, duration := range appTime {
+			appTimeChart.Labels = append(appTimeChart.Labels, app)
+			appTimeChart.Values = append(appTimeChart.Values, duration.Minutes())
+		}
+
+		customEventChart := ChartData{Labels: make([]string, 0), Values: make([]float64, 0)}
+		for tag, count := range customEventCounts {
+			customEventChart.Labels = append(customEventChart.Labels, tag)
+			customEventChart.Values = append(customEventChart.Values, float64(count))
+		}
+
+		// Sort chart data for better presentation
+		sort.Strings(appTimeChart.Labels) // Sort app names alphabetically
+		// Reorder values accordingly (could be improved with a struct slice)
+		reorderedAppValues := make([]float64, len(appTimeChart.Labels))
+		originalMap := make(map[string]float64)
+		for _, label := range appTimeChart.Labels {
+			for app, duration := range appTime {
+				if app == label {
+					originalMap[label] = duration.Minutes()
+					break
+				}
+			}
+		}
+		for i, label := range appTimeChart.Labels {
+			reorderedAppValues[i] = originalMap[label]
+		}
+		appTimeChart.Values = reorderedAppValues
+
+		sort.Strings(customEventChart.Labels) // Sort tags alphabetically
+		reorderedEventValues := make([]float64, len(customEventChart.Labels))
+		originalEventMap := make(map[string]float64)
+		for _, label := range customEventChart.Labels {
+			for tag, count := range customEventCounts {
+				if tag == label {
+					originalEventMap[label] = float64(count)
+					break
+				}
+			}
+		}
+		for i, label := range customEventChart.Labels {
+			reorderedEventValues[i] = originalEventMap[label]
+		}
+		customEventChart.Values = reorderedEventValues
+
+		// Marshal data to JSON for embedding
+		appJson, _ := json.Marshal(appTimeChart)
+		timelineJson, _ := json.Marshal(timelineEvents)
+		customJson, _ := json.Marshal(customEventChart)
+
+		// Prepare data for template execution
+		reportData := ReportData{
+			GeneratedAt:         time.Now().Format("2006-01-02 15:04:05"),
+			StartDate:           startTime.Format("2006-01-02"),
+			EndDate:             endTime.Format("2006-01-02"),
+			AppTimeJSON:         template.JS(appJson),
+			TimelineJSON:        template.JS(timelineJson),
+			CustomEventsJSON:    template.JS(customJson),
+			TotalPomodoroCycles: pomoCycles, // Use the calculated count
+		}
+
+		// Find the template file relative to the executable or CWD
+		// This makes it work better when installed/run from different locations
+		exePath, err := os.Executable()
+		if err != nil {
+			log.Printf("Warning: Cannot determine executable path: %v. Looking for template in CWD.", err)
+			exePath = "." // Fallback to current working directory
+		}
+		templatePath := filepath.Join(filepath.Dir(exePath), "template.html")
+		if _, err := os.Stat(templatePath); os.IsNotExist(err) {
+			// If not found near executable, try current working directory
+			templatePath = "template.html"
+			if _, err := os.Stat(templatePath); os.IsNotExist(err) {
+				log.Fatalf("Error: template.html not found near executable or in current directory.")
+			}
+		}
+
+		// Parse and execute template
+		tmpl, err := template.ParseFiles(templatePath)
+		if err != nil {
+			log.Fatalf("Failed to parse template file (%s): %v", templatePath, err)
+		}
+
+		f, err := os.Create(outputFile)
+		if err != nil {
+			log.Fatalf("Failed to create output file (%s): %v", outputFile, err)
+		}
+		defer f.Close()
+
+		err = tmpl.Execute(f, reportData)
+		if err != nil {
+			log.Fatalf("Failed to execute template: %v", err)
+		}
+
+		log.Printf("Report successfully generated: %s", outputFile)
+
+		// Open in browser if requested
+		if openReport {
+			absPath, _ := filepath.Abs(outputFile)
+			url := "file://" + absPath
+			log.Printf("Opening report in browser: %s", url)
+			if err := openBrowser(url); err != nil {
+				log.Printf("Warning: Failed to open report in browser: %v", err)
+			}
+		}
+	},
+}
+
 func main() {
 	// --- Pomodoro Commands ---
 	pomodoroStartCmd.Flags().StringP("state", "s", "Focus", "Pomodoro state to start (Focus, ShortBreak, LongBreak)")
+	rootCmd.PersistentFlags().StringVar(&dbPath, "db", "", "Path to the QuantMe database file (default: loaded from config or 'quantme.db')")
+
+	reportGenerateCmd.Flags().IntP("days", "d", 7, "Number of past days to include in the report")
+	reportGenerateCmd.Flags().StringP("output", "o", "quantme_report.html", "Output HTML file name")
+	reportGenerateCmd.Flags().BoolP("open", "O", false, "Open the generated report in the default browser")
+	reportCmd.AddCommand(reportGenerateCmd)
+	rootCmd.AddCommand(reportCmd)
+
 	pomodoroCmd.AddCommand(pomodoroStartCmd)
 	pomodoroCmd.AddCommand(pomodoroStopCmd)
 	rootCmd.AddCommand(pomodoroCmd)
