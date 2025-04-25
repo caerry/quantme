@@ -39,11 +39,11 @@ Profit. You know how much you are working that day.
 
 
 
-Design
+## TODO
 
-The core application is daemoon running on specific socket
-All new commands from CLI/TUI come to this socket
-
-Reveal additionally:
-Task system
-Task bounding to the timeline
+- Tree-view task system
+- Task bounding to the timeline
+- Convenient editing / adding notes to the reminders / events
+- Add notifications / play sounds via default linux libs
+- Add installer with creating service per user
+- Memory profily (?)
