@@ -1,3 +1,4 @@
+![image](https://github.com/user-attachments/assets/061bb510-40fd-44de-8fc3-490bd66520ae)
 
 # QuantMe
 
