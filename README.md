@@ -1,4 +1,7 @@
-![image](https://github.com/user-attachments/assets/061bb510-40fd-44de-8fc3-490bd66520ae =200x250)
+
+<p align="center">
+    <img src="https://github.com/user-attachments/assets/7095987b-6fe2-4998-bc35-b0e19ce3e428" alt="Description" width="300">
+</p>
 
 # QuantMe
 
